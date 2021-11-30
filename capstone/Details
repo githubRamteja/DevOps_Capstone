@@ -1,0 +1,166 @@
+# Terraform commands to initialize and build infrastructure through code using .tf files
+
+terraform init
+
+terraform plan
+
+terraform apply
+
+__________________________________________________________________________________________________________
+
+# Steps to initiate/create cluster, configure kubernetes, oidc account, relevant policies, service accounts and rest of the kubernetes setup through yaml files for deploying application into AWS cloud and maintain it.
+# Make sure to do configure aws-cli first using the 'aws configure' command.
+# For customizing the commands, it is better to follow official AWS documentation on ALB Controller, auto scalar, eksctl setup and kubernetes official documentation for kubectl relevant documents and articles.
+# In the following commands, 'my-eks-201' is the cluster name, 'demo' is the name space, role names are as per the then AWS cluster state.
+
+eksctl create cluster -f my-eks-conf.yaml
+
+aws eks --region us-east-1 update-kubeconfig --name my-eks-201
+
+kubectl get pods --kubeconfig ./.kube/config
+
+eksctl utils associate-iam-oidc-provider --region us-east-1 --cluster my-eks-201 --approve
+
+curl -o iam-policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.2.1/docs/install/iam_policy.json
+
+aws iam create-policy --policy-name AWSLoadBalancerControllerIAMPolicy --policy-document file://iam-policy.json
+
+eksctl create iamserviceaccount --cluster=my-eks-201 --namespace=demo --name=aws-load-balancer-controller --attach-policy-arn=arn:aws:iam::337384287907:policy/AWSLoadBalancerControllerIAMPolicy --override-existing-serviceaccounts --approve
+
+curl -o iam_policy_v1_to_v2_additional.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.3.0/docs/install/iam_policy_v1_to_v2_additional.json
+
+aws iam create-policy --policy-name AWSLoadBalancerControllerAdditionalIAMPolicy --policy-document file://iam_policy_v1_to_v2_additional.json
+
+aws iam attach-role-policy --role-name eksctl-my-eks-201-addon-iamserviceaccount-de-Role1-U778VY9N2OM0 --policy-arn arn:aws:iam::337384287907:policy/AWSLoadBalancerControllerAdditionalIAMPolicy
+
+kubectl apply --validate=false -f https://github.com/jetstack/cert-manager/releases/download/v1.5.4/cert-manager.yaml
+
+kubectl apply -f v2_2_0_full.yaml
+
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+aws iam create-policy --policy-name AmazonEKSClusterAutoscalerPolicy --policy-document file://cluster-autoscaler-policy.json
+
+eksctl create iamserviceaccount --cluster=my-eks-201 --namespace=demo --name=cluster-autoscaler --attach-policy-arn=arn:aws:iam::337384287907:policy/AmazonEKSClusterAutoscalerPolicy --override-existing-serviceaccounts --approve
+
+kubectl apply -f cluster-autoscaler-autodiscover.yaml
+
+kubectl annotate serviceaccount cluster-autoscaler -n demo eks.amazonaws.com/role-arn=arn:aws:iam::337384287907:role/cluster-autoscaler
+
+kubectl patch deployment cluster-autoscaler -n demo -p '{"spec":{"template":{"metadata":{"annotations":{"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}}}}}'
+
+kubectl -n demo edit deployment.apps/cluster-autoscaler
+
+kubectl set image deployment cluster-autoscaler -n demo cluster-autoscaler=k8s.gcr.io/autoscaling/cluster-autoscaler:v1.21.1
+
+kubectl -n demo logs -f deployment.apps/cluster-autoscaler
+
+__________________________________________________________________________________________________________
+
+# Configure ECR
+
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 337384287907.dkr.ecr.us-east-1.amazonaws.com
+
+# Docker commands to create image and run the node app.
+
+docker build -t capstone_upg .
+
+docker tag capstone_upg:latest 337384287907.dkr.ecr.us-east-1.amazonaws.com/capstone_upg:latest
+
+docker push 337384287907.dkr.ecr.us-east-1.amazonaws.com/capstone_upg:latest
+
+docker build
+
+docker images
+
+docker run -p 8081_8081 -d <image_id>
+
+docker run -p 8081:8081 -d e3dd91c6f931
+
+docker ps
+
+docker kill <container_name>
+
+docker ps -a
+
+__________________________________________________________________________________________________________
+
+# Commands to deploy node application and maintain.
+
+kubectl apply -f <file_name(s)>
+
+#If a Makefile is being used then following commands (as per the make file):
+make deploy_application
+
+# To create AWS EBS Volume for statefulset.
+aws ec2 create-volume --region us-east-1 --availability-zone=us-east-1a --size=11 --volume-type=gp2
+
+#Statefulset creation commands.
+
+kubectl create -f pv.yaml
+
+kubectl create -f pvc.yaml
+
+kubectl create -f configmap-redis.yaml
+
+kubectl create -f stateful-redis.yaml
+
+kubectl create -f redis-deployment.yaml
+
+kubectl get all -n demo
+
+kubectl get pods -n demo
+
+kubectl exec -it redis-cli-579bb5456d-2c4fk sh -n demo
+
+redis-cli -h redis -p 6379
+
+SET foo 1
+
+GET foo
+
+kubectl rollout restart deployment redis-cli -n demo
+
+kubectl get pods -n demo
+
+# Into New redis-cli pod
+
+kubectl exec -it redis-cli-6dc95c566-lg4kg sh -n demo
+
+redis-cli -h redis -p 6379
+
+GET foo
+
+__________________________________________________________________________________________________________
+
+# Deploy horizontal autoscalar using kubernetes yaml file.
+kubectl create -f upg-loadme-hpa.yaml
+
+# For metrics, monitoring and loading the app.
+
+ab -n100 -c10 'http://<INSERT-LB-DNS>/load?scale=100'
+
+kubectl get hpa -A
+
+# Install Prometheus
+
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+
+kubectl create ns prom
+
+helm install prometheus prometheus-community/kube-prometheus-stack -n prom
+
+kubectl get all -n prom
+
+ab -n100 -c10 'http://k8s-demo-upgloadm-e8feeacd15-545258400.us-east-1.elb.amazonaws.com/load?scale=250'
+
+kubectl get hpa -A
+
+# Port forward
+
+kubectl port-forward -n prom prometheus-prometheus-kube-prometheus-prometheus-0 9090
+
+kubectl port-forward -n prom prom-grafana-6c578f9954-rjdmk 3000
+
+# Prometheus command to monitor the load testing
+sum(kube_pod_container_status_ready{namespace="demo",pod=~"upg-loadme-.*"})
